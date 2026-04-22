@@ -1,1 +1,24 @@
 _backup
+sandbox/.tmp
+.env
+.env.clay
+sandbox/test
+.tmp
+
+
+# Sandbox local runtime state and secrets
+sandbox/.env
+sandbox/.env.*
+sandbox/identity.json
+sandbox/share1.json
+sandbox/share2.json
+sandbox/share3.json
+sandbox/policy.json
+sandbox/daily_tracker.json
+sandbox/security_cache.json
+sandbox/audit.jsonl
+sandbox/wrapped_sek.json
+sandbox/asset_cache.json
+sandbox/asset_cursors.json
+sandbox/**/asset_cache.json
+sandbox/**/asset_cursors.json

@@ -1,0 +1,1997 @@
+openapi: 3.0.3
+info:
+  title: Claw Wallet Sandbox HTTP API
+  description: |
+    Local sandbox process exposing wallet lifecycle, signing, transfer, swap, policy, audit, and RPC-proxy endpoints.
+
+    **Authentication:** When `AGENT_TOKEN` is set in the environment, most routes require:
+    `Authorization: Bearer <AGENT_TOKEN>`. If `AGENT_TOKEN` is empty, protected routes are allowed in local dev mode.
+
+    **Try it out:** Click **Authorize**, enter the same bearer token as `.env.clay`, then execute operations.
+
+    **Reality check:** this spec mirrors the current sandbox implementation and documents a mix of MVP, gray-release, and legacy bootstrap paths.
+  version: "1.1.0"
+
+servers:
+  - url: /
+    description: Current sandbox origin
+
+tags:
+  - name: Health
+    description: Liveness and bootstrap health.
+  - name: Wallet
+    description: Wallet creation, binding, unlock, status, assets, and history.
+  - name: Transactions
+    description: Sign, broadcast, and transfer flows.
+  - name: EVM
+    description: Managed EVM contract invocation helpers.
+  - name: Sui
+    description: Sui transaction bytes and option-driven helpers.
+  - name: Swap
+    description: DEX swap helpers.
+  - name: Skills
+    description: SafuSkill discovery, preload, and local read helpers.
+  - name: Sandbox
+    description: Prices, risk cache, audit logs, and shutdown.
+  - name: Control
+    description: Legacy local control endpoints used by installer/bootstrap flows.
+  - name: RPC
+    description: Upstream JSON-RPC proxy per chain.
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: Value of AGENT_TOKEN from sandbox environment (same as CLAY_AGENT_TOKEN in client .env).
+
+  schemas:
+    ErrorText:
+      type: string
+      description: Plain-text error body from http.Error
+    StatusMessage:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+    AddressNote:
+      type: object
+      additionalProperties: false
+      properties:
+        address:
+          type: string
+        chain:
+          type: string
+          description: Optional chain scope for whitelist or blacklist entries.
+        note:
+          type: string
+      required: [address]
+    Policy:
+      type: object
+      additionalProperties: true
+      properties:
+        max_amount_per_tx_usd:
+          type: number
+        daily_limit_usd:
+          type: number
+        whitelist_to:
+          type: array
+          items:
+            $ref: "#/components/schemas/AddressNote"
+        blacklist_to:
+          type: array
+          items:
+            $ref: "#/components/schemas/AddressNote"
+        pin_ttl_seconds:
+          type: integer
+          format: int64
+        daily_max_tx_count:
+          type: integer
+        unpriced_asset_policy:
+          type: string
+          enum: [allow, block]
+        block_high_risk_tokens:
+          type: boolean
+        allow_blind_sign:
+          type: boolean
+        strict_plain_text:
+          type: boolean
+        keep_share2_resident:
+          type: boolean
+        personal_sign_keyword_blacklist:
+          type: array
+          items:
+            type: string
+    LocalPolicyUpdateRequest:
+      type: object
+      additionalProperties: false
+      description: Partial local policy update payload. Unspecified fields remain unchanged.
+      properties:
+        max_amount_per_tx_usd:
+          type: number
+          minimum: 0
+          maximum: 1000
+        daily_limit_usd:
+          type: number
+          minimum: 0
+          maximum: 10000
+        daily_max_tx_count:
+          type: integer
+          minimum: 0
+          maximum: 100
+        whitelist_to:
+          type: array
+          items:
+            $ref: "#/components/schemas/AddressNote"
+        unpriced_asset_policy:
+          type: string
+          enum: [allow, block]
+        allow_blind_sign:
+          type: boolean
+        strict_plain_text:
+          type: boolean
+    LocalPolicyUpdateResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          example: policy_updated
+        policy:
+          $ref: "#/components/schemas/Policy"
+      required: [status, policy]
+    UsageSnapshot:
+      type: object
+      additionalProperties: false
+      properties:
+        local_spent_wei:
+          type: string
+        local_spent_usd:
+          type: number
+        local_tx_count:
+          type: integer
+        onchain_spent_usd:
+          type: number
+        onchain_tx_count:
+          type: integer
+        effective_spent_usd:
+          type: number
+        effective_tx_count:
+          type: integer
+    PriceCacheResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        prices:
+          type: object
+          additionalProperties: true
+    SecurityCacheResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        security:
+          type: object
+          additionalProperties: true
+    AuditLogEntry:
+      type: object
+      additionalProperties: true
+    WalletHistoryEntry:
+      type: object
+      additionalProperties: true
+    EncryptedShare:
+      type: object
+      additionalProperties: false
+      properties:
+        cipher: { type: string }
+        iv: { type: string }
+        salt: { type: string }
+    WalletStatusResponse:
+      type: object
+      description: |
+        Snapshot from `handleStatus`. This mirrors the live sandbox response and may include
+        extra implementation-specific fields in addition to the documented ones.
+      additionalProperties: true
+      properties:
+        uid: { type: string }
+        address: { type: string }
+        addresses: { type: object, additionalProperties: { type: string } }
+        address_explorers: { type: object, additionalProperties: { type: string } }
+        master_pub_key: { type: string }
+        status:
+          type: string
+          enum:
+            - inactive
+            - identity_set_waiting_for_activation
+            - provisioned_waiting_for_pin
+            - ready
+        locked_reason:
+          type: string
+          enum:
+            - waiting_for_activation
+            - waiting_for_pin
+            - ttl_expired
+            - activation_failed
+            - reactivation_failed
+        has_provisioned_share1: { type: boolean }
+        today_spent_wei: { type: string }
+        today_spent_usd: { type: number }
+        today_tx_count: { type: integer }
+        today_local_spent_wei: { type: string }
+        today_local_spent_usd: { type: number }
+        today_local_tx_count: { type: integer }
+        today_onchain_spent_usd: { type: number }
+        today_onchain_tx_count: { type: integer }
+        today_effective_spent_usd: { type: number }
+        today_effective_tx_count: { type: integer }
+        oracle_healthy: { type: boolean }
+        oracle_native: { type: boolean }
+        oracle_tokens: { type: boolean }
+        pin_residency_expires_at:
+          type: string
+          format: date-time
+        policy:
+          $ref: "#/components/schemas/Policy"
+    WalletInitRequest:
+      type: object
+      properties:
+        master_pin:
+          type: string
+          description: Optional internal PIN used to seed the local wallet during bootstrap.
+    WalletInitResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        address: { type: string }
+        addresses: { type: object, additionalProperties: { type: string } }
+        uid: { type: string }
+        status: { type: string }
+        existing_identity: { type: boolean }
+        locked_reason: { type: string }
+    WalletUnlockRequest:
+      type: object
+      required: [pin]
+      properties:
+        pin: { type: string }
+    WalletBindUIDRequest:
+      type: object
+      required: [uid]
+      properties:
+        uid: { type: string }
+    WalletBindRequest:
+      type: object
+      required: [message_hash_hex]
+      properties:
+        message_hash_hex:
+          type: string
+          description: 32-byte message hash in hex form.
+    WalletImportRequest:
+      type: object
+      required: [uid, master_pub_key, enc_share3]
+      properties:
+        uid: { type: string }
+        master_pub_key: { type: string }
+        addresses: { type: object, additionalProperties: { type: string } }
+        enc_share3: { $ref: "#/components/schemas/EncryptedShare" }
+    WalletProvisionRequest:
+      type: object
+      required: [uid, otp]
+      properties:
+        uid: { type: string }
+        otp: { type: string }
+    ZeroGBackupRequest:
+      type: object
+      additionalProperties: false
+      description: Optional network overrides for the sandbox 0G recovery backup flow.
+      properties:
+        rpc_url:
+          type: string
+          description: 0G EVM RPC URL used for both Storage payment and RecoveryVault registration.
+          example: "https://evmrpc-testnet.0g.ai"
+        indexer_url:
+          type: string
+          description: 0G Storage indexer URL used by the 0G Storage SDK uploader.
+          example: "https://indexer-storage-testnet-turbo.0g.ai"
+        vault_address:
+          type: string
+          description: RecoveryVault contract address on the selected 0G network.
+          example: "0x254bfe1433C4C10d05cD37B6eF3F062323FC6be5"
+    ZeroGBackupShare:
+      type: object
+      additionalProperties: false
+      properties:
+        receipt_hex:
+          type: string
+          description: Deterministic receipt hash registered in RecoveryVault.
+        root_hash:
+          type: string
+          description: 0G Storage root returned by the upload.
+        tx_hash:
+          type: string
+          description: 0G Storage upload transaction hash when returned by the SDK.
+        commitment_hex:
+          type: string
+          description: Keccak256 commitment over the uploaded encrypted share blob.
+      required: [receipt_hex, root_hash, tx_hash, commitment_hex]
+    ZeroGBackupResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        uid_hash_hex:
+          type: string
+        epoch:
+          type: integer
+          format: int64
+        vault_address:
+          type: string
+        vault_tx_hash:
+          type: string
+        share2:
+          $ref: "#/components/schemas/ZeroGBackupShare"
+        share3:
+          $ref: "#/components/schemas/ZeroGBackupShare"
+      required: [uid_hash_hex, epoch, vault_address, vault_tx_hash, share2, share3]
+    SignRequest:
+      type: object
+      description: |
+        Supported sign modes: `transaction`, `personal_sign`, `typed_data`, `raw_hash`.
+
+        Supported chains include the EVM set (`ethereum`, `0g`, `base`, `bsc`, `arbitrum`, `optimism`, `polygon`, `avalanche`, `linea`, `zksync`, `monad`)
+        plus `solana`, `sui`, `aptos`, `ton`, and `bitcoin` depending on the flow.
+      required: [chain, sign_mode, uid]
+      properties:
+        chain:
+          type: string
+        sign_mode:
+          type: string
+          enum: [transaction, personal_sign, typed_data, raw_hash]
+        derivation_path: { type: string }
+        builder_kind:
+          type: string
+          description: Structured builder shortcut, e.g. `native_transfer`, `erc20_transfer`, `sol_transfer`, `spl_transfer`, `sui_transfer`.
+        to: { type: string }
+        token_contract: { type: string }
+        amount_wei: { type: string }
+        data: { type: string }
+        uid: { type: string }
+        confirmed_by_user: { type: boolean }
+        enc_share1: { $ref: "#/components/schemas/EncryptedShare" }
+        wrapped_share2_hex: { type: string }
+        share2_nonce_hex: { type: string }
+        tx_payload_hex: { type: string }
+        typed_data: { description: EIP-712 or chain-specific typed data }
+    SignResult:
+      type: object
+      properties:
+        signature_hex: { type: string }
+        from: { type: string }
+        tx_payload_hex: { type: string }
+        raw_tx_hex: { type: string }
+        builder_kind: { type: string }
+    BroadcastRequest:
+      type: object
+      required: [chain]
+      properties:
+        chain: { type: string }
+        uid: { type: string }
+        raw_tx_hex: { type: string }
+        raw_tx_base64: { type: string }
+        tx_bytes_hex: { type: string }
+        tx_bytes_base64: { type: string }
+        signature: { type: string }
+        signatures:
+          type: array
+          items: { type: string }
+        options: { type: object }
+    BroadcastResponse:
+      type: object
+      properties:
+        chain: { type: string }
+        submitted_id: { type: string }
+        tx_hash: { type: string }
+        signature: { type: string }
+        digest: { type: string }
+    TransferRequest:
+      type: object
+      required: [chain, to, amount_wei]
+      properties:
+        chain: { type: string }
+        uid: { type: string }
+        to: { type: string }
+        amount_wei: { type: string }
+        token_contract: { type: string }
+        sui_gas_budget: { type: string }
+    ManagedEVMInvokeRequest:
+      type: object
+      properties:
+        uid: { type: string }
+        chain: { type: string, description: Defaults to bsc if omitted }
+        to: { type: string }
+        value: { type: string, description: Wei as decimal string }
+        data: { type: string, description: Calldata hex }
+        confirmed_by_user: { type: boolean }
+    UniswapSwapTradeAPIRequest:
+      type: object
+      additionalProperties: false
+      description: |
+        Uniswap swap request routed via Uniswap Trade API (api-key).
+
+        Supported `chain` values:
+        - ethereum, optimism, bsc, polygon, monad, base, arbitrum, avalanche, zksync, linea
+      properties:
+        chain:
+          type: string
+          description: Target EVM chain. Must be one of ethereum/optimism/bsc/polygon/monad/base/arbitrum/avalanche/zksync/linea.
+          enum: [ethereum, optimism, bsc, polygon, monad, base, arbitrum, avalanche, zksync, linea]
+        uid: { type: string, description: Optional bound wallet UID (used for auditing / policy context). }
+        token_in:
+          type: string
+          description: Input token contract address, or `native` (can be omitted to mean native).
+        token_out:
+          type: string
+          description: Output token contract address, or `native`.
+        recipient:
+          type: string
+          description: Recipient address; defaults to the wallet address when omitted.
+        amount_in_wei:
+          type: string
+          description: Amount in (decimal string, smallest unit).
+        routing_preference:
+          type: string
+          description: Routing preference hint (e.g. BEST_PRICE).
+        protocols:
+          type: array
+          items: { type: string }
+          description: Optional protocol allowlist for routing (case-insensitive; e.g. V2, V3, UNISWAPX).
+        urgency:
+          type: string
+          description: Optional urgency hint for routing (provider-specific).
+        auto_slippage:
+          type: string
+          description: Optional auto slippage mode (e.g. DEFAULT/AUTO).
+        slippage_tolerance:
+          type: integer
+          format: int64
+          description: Optional slippage tolerance in basis points (bps). When set, overrides auto slippage.
+        permit_amount:
+          type: string
+          description: Permit2 allowance amount setting (provider-specific; e.g. FULL).
+      required: [chain, token_out, amount_in_wei]
+    UniswapSwapTradeAPIResponse:
+      type: object
+      additionalProperties: false
+      description: |
+        Uniswap Trade API swap result.
+
+        This API may execute:
+        - an ERC20 approval reset (if required by the token),
+        - an ERC20 approval (typically to Permit2),
+        - then either submit a swap tx, or place an order (UniswapX / order routing).
+      properties:
+        chain: { type: string }
+        from: { type: string }
+        router_kind: { type: string, enum: [trade_api] }
+        router: { type: string, description: Swap target contract address (when a swap tx is submitted). }
+        request_id: { type: string }
+        routing: { type: string, description: Routing method returned by provider (e.g. CLASSIC, DUTCH, UNISWAPX). }
+        token_in: { type: string }
+        token_out: { type: string }
+        recipient: { type: string }
+        amount_in_wei: { type: string }
+        approval_required: { type: boolean }
+        approval_reset_submitted_id: { type: string }
+        approval_reset_tx_hash: { type: string }
+        approval_submitted_id: { type: string }
+        approval_tx_hash: { type: string }
+        order_id: { type: string }
+        order_status: { type: string }
+        swap_submitted_id: { type: string }
+        swap_tx_hash: { type: string }
+      required:
+        - chain
+        - from
+        - router_kind
+        - token_in
+        - token_out
+        - recipient
+        - amount_in_wei
+        - approval_required
+        - swap_submitted_id
+    JupiterSwapRequest:
+      type: object
+      additionalProperties: false
+      description: |
+        Managed Jupiter swap (Solana only).
+
+        Notes:
+        - `chain` defaults to `solana` if omitted.
+        - `token_in` can be omitted or set to `native` (SOL).
+        - `token_out` can be set to `native` (SOL).
+        - `slippage_bps` defaults to `50` when omitted/0.
+        - `wrap_and_unwrap_sol`, `use_shared_accounts`, `dynamic_compute_unit_limit` default to `true` when omitted.
+      properties:
+        chain:
+          type: string
+          description: Must be `solana` (defaults to solana if omitted).
+        uid: { type: string, description: Optional bound wallet UID (used for auditing / policy context). }
+        token_in:
+          type: string
+          description: Token symbol or mint, or `native` (SOL).
+        token_out:
+          type: string
+          description: Token symbol or mint, or `native` (SOL).
+        amount_in_wei:
+          type: string
+          description: Amount in (decimal string, smallest unit). Must fit uint64 for Solana.
+        slippage_bps:
+          type: integer
+          format: int64
+          description: Slippage in basis points; defaults to 50.
+        as_legacy_transaction:
+          type: boolean
+          description: Request legacy transaction instead of versioned transaction when possible.
+        wrap_and_unwrap_sol:
+          type: boolean
+          description: Whether to wrap/unwrap SOL (defaults true).
+        use_shared_accounts:
+          type: boolean
+          description: Whether to use shared accounts (defaults true).
+        dynamic_compute_unit_limit:
+          type: boolean
+          description: Whether to enable dynamic compute unit limit (defaults true).
+      required: [token_out, amount_in_wei]
+    JupiterSwapResponse:
+      type: object
+      additionalProperties: false
+      description: |
+        Jupiter swap execution result. The sandbox fetches a quote, builds a swap transaction, signs it, and broadcasts it.
+      properties:
+        chain: { type: string, enum: [solana] }
+        from: { type: string }
+        token_in: { type: string }
+        token_out: { type: string }
+        amount_in_wei: { type: string }
+        slippage_bps: { type: integer, format: int64 }
+        in_amount: { type: string }
+        out_amount: { type: string }
+        other_amount_threshold: { type: string }
+        swap_mode: { type: string }
+        as_legacy_transaction: { type: boolean }
+        used_versioned_tx: { type: boolean }
+        jupiter_program: { type: string, description: The Jupiter program ID used by the built transaction. }
+        swap_tx_base64: { type: string, description: Signed swap transaction base64 (ready to submit). }
+        message_hex: { type: string, description: Message bytes hex with 0x prefix. }
+        submitted_id: { type: string }
+        signature: { type: string }
+        last_valid_block_height: { type: integer, format: int64 }
+      required:
+        - chain
+        - from
+        - token_in
+        - token_out
+        - amount_in_wei
+        - slippage_bps
+        - as_legacy_transaction
+        - used_versioned_tx
+        - jupiter_program
+    HaedalTxBytesExecuteRequest:
+      type: object
+      properties:
+        uid: { type: string }
+        txBytes: { type: string }
+        tx_bytes_base64: { type: string }
+        tx_bytes_hex: { type: string }
+    HaedalOptionedRequest:
+      type: object
+      properties:
+        uid: { type: string }
+        option: { type: string, description: Haedal/Cetus skill option key }
+        defi: { type: string }
+        body: { type: object, additionalProperties: true }
+
+    SafuSkillPreloadItem:
+      type: object
+      additionalProperties: true
+      properties:
+        id: { type: string }
+        name: { type: string }
+        status:
+          type: string
+          description: Cache state for this item, such as `cached`, `downloaded`, or `already_initialized`.
+        local_path: { type: string }
+    SafuSkillPreloadResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          example: ok
+        preloaded_count:
+          type: integer
+          format: int64
+        skills:
+          type: array
+          items:
+            $ref: "#/components/schemas/SafuSkillPreloadItem"
+      required: [status, preloaded_count, skills]
+    SafuSkillResolveResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        status:
+          type: string
+          example: ok
+        source:
+          type: string
+          description: Where the result came from, such as `safuskill` or `local_cache_stale`.
+        name: { type: string }
+        id: { type: string }
+        installed: { type: boolean }
+        local_path: { type: string }
+        metadata_path: { type: string }
+        reload_needed: { type: boolean }
+        update_error: { type: string }
+    SafuSkillReadResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          example: ok
+        name: { type: string }
+        local_path: { type: string }
+        content:
+          type: string
+          description: Raw SKILL.md content loaded from the local sandbox cache.
+      required: [status, name, local_path, content]
+
+    LifiBridgeRequest:
+      type: object
+      description: |
+        **AGENT INSTRUCTION:**
+        1. Before calling the bridge execution API, you MUST call the bridge quote API.
+        2. Before calling the bridge quote API, you MUST call the bridge supported tokens API (`/api/v1/tx/bridge/lifi/tokens?chains={chainID}`).
+        3. If the source chain is EVM and the target chain is Sui, you MUST ask the user if they want to route via Solana (`via_solana`). Explain that EVM -> Sui directly takes 15 minutes, while EVM -> Solana -> Sui takes only 2 minutes. Do NOT ask this if it's not EVM -> Sui.
+      properties:
+        via_solana:
+          type: boolean
+          description: "Whether to route through Solana when bridging from EVM to Sui. Only applicable for EVM to Sui routes."
+        from_chain_id:
+          type: string
+          description: "Source Chain ID (LI.FI standard ID). Common IDs: ETH: '1', BSC: '56', Base: '8453', Arbitrum: '42161', Optimism: '10', Polygon: '137', Solana: '1151111081099710', Sui: '9270000000000000', Bitcoin: '20000000000001'. For more, see https://docs.li.fi/introduction/chains"
+        from_address: { type: string, description: "Source wallet address" }
+        from_token:
+          type: string
+          description: |
+            Source Token address or symbol.
+            **AGENT INSTRUCTION:** For tokens with multiple issuers (like USDT/USDC), ALWAYS prefer using the exact contract address instead of just the symbol. Before requesting a quote or executing a bridge, you MUST call `/api/v1/tx/bridge/lifi/tokens?chains={chainID}` to verify if the specific token address or symbol is supported on that chain. If a bridge quote or execution fails, verify the token support again.
+        amount: { type: string, description: "Transaction amount (in smallest unit)" }
+        to_chain_id:
+          type: string
+          description: "Target Chain ID (LI.FI standard ID). Common IDs are same as from_chain_id."
+        to_address: { type: string, description: "Target wallet address" }
+        to_token:
+          type: string
+          description: |
+            Target Token address or symbol.
+            **AGENT INSTRUCTION:** Similarly, MUST call `/api/v1/tx/bridge/lifi/tokens?chains={chainID}` to verify if the specific token is supported on the target chain.
+        slippage: { type: number, description: "Slippage tolerance (optional, default 0.005)" }
+      required: [from_chain_id, from_address, from_token, amount, to_chain_id, to_address, to_token]
+    LifiRouteStep:
+      type: object
+      properties:
+        tool: { type: string }
+        from_token: { type: string }
+        to_token: { type: string }
+        estimated_time: { type: integer, description: "Estimated time for this step in seconds" }
+    LifiQuoteResponse:
+      type: object
+      properties:
+        is_success: { type: boolean }
+        reason: { type: string }
+        tool: { type: string }
+        steps:
+          type: array
+          items: { $ref: "#/components/schemas/LifiRouteStep" }
+        estimated_duration: { type: integer, description: "Total estimated duration in seconds" }
+        amount_in: { type: string, description: "Human-readable input amount formatted by token decimals" }
+        amount_out: { type: string, description: "Human-readable output amount formatted by token decimals" }
+        amount_in_raw: { type: string, description: "Raw input amount in smallest unit" }
+        amount_out_raw: { type: string, description: "Raw output amount in smallest unit" }
+        amount_in_symbol: { type: string, description: "Input token symbol" }
+        amount_out_symbol: { type: string, description: "Output token symbol" }
+        amount_in_decimals: { type: integer, description: "Input token decimals" }
+        amount_out_decimals: { type: integer, description: "Output token decimals" }
+    LifiExecuteStep:
+      type: object
+      properties:
+        from_chain_id: { type: string }
+        to_chain_id: { type: string }
+        tx_hash: { type: string }
+        status: { type: string }
+        status_url: { type: string }
+    LifiBridgeResponse:
+      type: object
+      properties:
+        uid: { type: string }
+        success: { type: boolean }
+        status: { type: string, description: "PENDING, DONE, FAILED" }
+        message: { type: string }
+        steps:
+          type: array
+          items: { $ref: "#/components/schemas/LifiExecuteStep" }
+        final_tx_hash: { type: string }
+        final_status_url: { type: string }
+    LifiStatusRequest:
+      type: object
+      required: [uid]
+      properties:
+        uid: { type: string }
+    LifiStatusResponse:
+      type: object
+      properties:
+        status: { type: string, description: "PENDING, DONE, FAILED, NOT_FOUND" }
+        message: { type: string }
+        steps:
+          type: array
+          items: { $ref: "#/components/schemas/LifiExecuteStep" }
+        final_tx_hash: { type: string }
+        final_status_url: { type: string }
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      security: []
+      summary: Liveness probe
+      description: Returns `{"status":"ok"}` when the sandbox process is alive.
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusMessage"
+              example:
+                status: ok
+
+  /api/v1/wallet/status:
+    get:
+      tags: [Wallet]
+      summary: Wallet, policy, and spend snapshot
+      description: Returns addresses, lock state, policy, spend counters, and oracle health.
+      responses:
+        "200":
+          description: Wallet snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WalletStatusResponse" }
+              example:
+                uid: "uid_123"
+                address: "0x1111111111111111111111111111111111111111"
+                addresses:
+                  ethereum: "0x1111111111111111111111111111111111111111"
+                  solana: "7h7m..."
+                address_explorers:
+                  ethereum: "https://etherscan.io/address/0x1111111111111111111111111111111111111111"
+                master_pub_key: "02ab..."
+                status: ready
+                has_provisioned_share1: false
+                policy:
+                  max_amount_per_tx_usd: 1000
+                  daily_limit_usd: 5000
+                  pin_ttl_seconds: 900
+                  daily_max_tx_count: 20
+                  unpriced_asset_policy: block
+                  block_high_risk_tokens: true
+                  allow_blind_sign: false
+                  strict_plain_text: true
+                  keep_share2_resident: false
+                  personal_sign_keyword_blacklist: [approve, permit, transfer]
+                today_spent_wei: "0"
+                today_spent_usd: 0
+                today_tx_count: 0
+                today_local_spent_wei: "0"
+                today_local_spent_usd: 0
+                today_local_tx_count: 0
+                today_onchain_spent_usd: 0
+                today_onchain_tx_count: 0
+                today_effective_spent_usd: 0
+                today_effective_tx_count: 0
+                oracle_healthy: true
+                oracle_native: true
+                oracle_tokens: true
+                pin_residency_expires_at: "2026-03-21T12:00:00Z"
+
+  /api/v1/wallet/backup/0g:
+    post:
+      tags: [Wallet]
+      summary: Upload encrypted recovery shares to 0G Storage and register RecoveryVault receipts
+      description: |
+        Sandbox-only disaster recovery backup flow for locally initialized wallets.
+
+        The sandbox encrypts the current `share2` and `share3` backup blobs with the in-memory SEK,
+        uploads both blobs to 0G Storage, derives deterministic receipts from `uidHash`, share kind,
+        0G Storage root, and blob commitment, then submits a single `registerBackup` transaction to
+        the configured RecoveryVault contract.
+
+        This endpoint requires the wallet's local share state to still be available. If share2 or SEK
+        has been wiped by TTL, policy, restart, or manual wipe, the endpoint returns 409 and should be
+        retried after the wallet is reactivated with local share material available.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ZeroGBackupRequest"
+            examples:
+              testnet:
+                summary: 0G Galileo testnet
+                value:
+                  rpc_url: "https://evmrpc-testnet.0g.ai"
+                  indexer_url: "https://indexer-storage-testnet-turbo.0g.ai"
+                  vault_address: "0x254bfe1433C4C10d05cD37B6eF3F062323FC6be5"
+              mainnet:
+                summary: 0G mainnet RecoveryVault
+                value:
+                  rpc_url: "https://evmrpc.0g.ai"
+                  indexer_url: "https://indexer-storage-turbo.0g.ai"
+                  vault_address: "0xa8DF92c6724Db748B82d90f50b4b1e1542175440"
+      responses:
+        "200":
+          description: Shares uploaded and receipts registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ZeroGBackupResponse"
+        "400":
+          description: Invalid JSON body
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "409":
+          description: Required local wallet state is unavailable
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "500":
+          description: 0G Storage upload, RecoveryVault registration, or configuration failure
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /api/v1/wallet/init:
+    post:
+      tags: [Wallet]
+      summary: Create a local wallet or return the existing identity
+      description: |
+        Creates a new wallet via relay `/sss/setup`, persists identity only after relay setup succeeds,
+        and activates the local signer when possible.
+
+        The operation is idempotent: if the sandbox already has an identity, the existing wallet snapshot is returned.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WalletInitRequest"
+            example:
+              master_pin: "123456"
+      responses:
+        "200":
+          description: Wallet created or existing identity returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletInitResponse"
+        "500":
+          description: Wallet generation or persistence failure
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "502":
+          description: Relay unavailable or setup failed
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /api/v1/wallet/unlock:
+    post:
+      tags: [Wallet]
+      summary: Unlock a provisioned or imported wallet with PIN
+      description: Only valid for wallets that already have a remote-managed encrypted share.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WalletUnlockRequest"
+            example:
+              pin: "123456"
+      responses:
+        "200":
+          description: Wallet state after activation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletStatusResponse"
+        "401":
+          description: Wrong PIN
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "409":
+          description: Not a provisioned wallet
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /api/v1/wallet/reactivate:
+    post:
+      tags: [Wallet]
+      summary: Reactivate a locally initialized wallet using the local SEK
+      description: Not for imported/provisioned wallets - use `/api/v1/wallet/unlock` instead.
+      responses:
+        "200":
+          description: Wallet state after activation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletStatusResponse"
+        "400":
+          description: Wallet identity not initialized
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "409":
+          description: Wrong wallet mode or missing local share
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "500":
+          description: Reactivation failed
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /api/v1/wallet/bind_uid:
+    post:
+      tags: [Wallet]
+      summary: Persist a relay-assigned UID into `identity.json`
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WalletBindUIDRequest"
+            example:
+              uid: "uid_123"
+      responses:
+        "200":
+          description: UID stored
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  status: { type: string }
+                  uid: { type: string }
+              example:
+                status: success
+                uid: uid_123
+        "400":
+          description: Invalid payload
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /api/v1/wallet/bind:
+    post:
+      tags: [Wallet]
+      summary: Sign the bind challenge and forward it to the relay
+      description: |
+        The sandbox signs the 32-byte hash with the master key and forwards the signature to the relay `/wallets/bind`.
+        The response body is passed through from the relay on success.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WalletBindRequest"
+            example:
+              message_hash_hex: "0x7b0c..."
+      responses:
+        "200":
+          description: Relay bind response passthrough
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "409":
+          description: Wallet not activated or no UID bound
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "502":
+          description: Relay bind failed
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /api/v1/wallet/import:
+    post:
+      tags: [Wallet]
+      summary: Import provisioned wallet material
+      description: Imports a relay-provisioned wallet snapshot into the local sandbox.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WalletImportRequest"
+      responses:
+        "200":
+          description: Imported wallet snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletStatusResponse"
+        "400":
+          description: Invalid payload or identity conflict
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /api/v1/wallet/provision:
+    post:
+      tags: [Wallet]
+      summary: Claim a remote-provisioned wallet with OTP
+      description: Calls the relay claim flow, then imports the returned wallet snapshot.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WalletProvisionRequest"
+            example:
+              uid: "uid_123"
+              otp: "123456"
+      responses:
+        "200":
+          description: Imported wallet snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletStatusResponse"
+        "400":
+          description: Invalid input or imported payload rejected
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "502":
+          description: Relay claim failed or relay response invalid
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /api/v1/wallet/refresh:
+    post:
+      tags: [Wallet]
+      summary: Trigger async asset refresh (background)
+      responses:
+        "200":
+          description: Refresh triggered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusMessage"
+              example:
+                status: refresh_triggered
+
+  /api/v1/wallet/refresh/chain:
+    post:
+      tags: [Wallet]
+      summary: Refresh a single chain and wait until it completes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                chain:
+                  type: string
+              required: [chain]
+      responses:
+        "200":
+          description: Chain refresh completed or existing inflight refresh waited
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /api/v1/wallet/refreshAndAssets:
+    get:
+      tags: [Wallet]
+      summary: Refresh balances then return assets snapshot
+      responses:
+        "200":
+          description: Multichain asset snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /api/v1/wallet/assets:
+    get:
+      tags: [Wallet]
+      summary: Refresh and return cached multichain assets
+      responses:
+        "200":
+          description: Asset snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /api/v1/wallet/history:
+    get:
+      tags: [Wallet]
+      summary: Transaction history
+      description: Optional chain and limit query filters are applied in memory.
+      parameters:
+        - in: query
+          name: chain
+          schema: { type: string }
+          description: Chain id or `all`.
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Array of transaction records
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WalletHistoryEntry"
+
+  /api/v1/price/cache:
+    get:
+      tags: [Sandbox]
+      summary: Oracle price snapshot
+      responses:
+        "200":
+          description: Price cache snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PriceCacheResponse"
+
+  /api/v1/security/cache:
+    get:
+      tags: [Sandbox]
+      summary: Security / risk assessment cache snapshot
+      responses:
+        "200":
+          description: Security cache snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecurityCacheResponse"
+
+  /api/v1/audit/logs:
+    get:
+      tags: [Sandbox]
+      summary: Recent audit log lines
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50 }
+      responses:
+        "200":
+          description: Audit entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AuditLogEntry"
+
+  /api/v1/policy/local:
+    get:
+      tags: [Wallet]
+      summary: Read-only local policy file (policy.json)
+      description: |
+        Returns the raw JSON from the on-disk `policy.json`. **GET only** - there is no POST/PUT on this path.
+
+        To change limits or rules, use the **bound-user app** after binding, or rely on **relay-driven policy sync** that rewrites the file. A merged policy object is also included in `GET /api/v1/wallet/status`.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Policy JSON (same shape as components/schemas/Policy when valid)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Policy"
+        "404":
+          description: policy.json not found on disk
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "405":
+          description: Method not allowed (only GET is supported)
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /api/v1/policy/update:
+    post:
+      tags: [Wallet]
+      summary: Update selected local policy fields
+      description: |
+        Applies a partial update to the local policy, preserving all unspecified fields.
+
+        Current limits enforced by the sandbox:
+        - `max_amount_per_tx_usd`: 0 to 1000
+        - `daily_limit_usd`: 0 to 10000
+        - `daily_max_tx_count`: 0 to 100
+        - `unpriced_asset_policy`: `allow` or `block`
+
+        The updated policy is persisted to the encrypted on-disk policy store and then reloaded into the runtime engine.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LocalPolicyUpdateRequest"
+            examples:
+              updateLimits:
+                summary: Update limits and signing controls
+                value:
+                  max_amount_per_tx_usd: 1000
+                  daily_limit_usd: 8000
+                  daily_max_tx_count: 80
+                  whitelist_to:
+                    - address: "0xabc"
+                      chain: "ethereum"
+                      note: "friend"
+                  unpriced_asset_policy: allow
+                  allow_blind_sign: true
+                  strict_plain_text: false
+      responses:
+        "200":
+          description: Policy updated and reloaded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LocalPolicyUpdateResponse"
+        "400":
+          description: Invalid payload or limit violation
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "401":
+          description: Missing or invalid bearer token
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "405":
+          description: Method not allowed
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "500":
+          description: Policy engine not initialized or policy persistence failed
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+    put:
+      tags: [Wallet]
+      summary: Update selected local policy fields
+      description: Same behavior as `POST /api/v1/policy/update`.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LocalPolicyUpdateRequest"
+      responses:
+        "200":
+          description: Policy updated and reloaded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LocalPolicyUpdateResponse"
+        "400":
+          description: Invalid payload or limit violation
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "401":
+          description: Missing or invalid bearer token
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "405":
+          description: Method not allowed
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "500":
+          description: Policy engine not initialized or policy persistence failed
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /api/v1/skills/safuskill/preload:
+    post:
+      tags: [Skills]
+      summary: Preload the default SafuSkill set
+      description: |
+        Downloads and caches the default `BNBChain Skills` subset from `safuskill.ai` into the local sandbox skill cache.
+        Already-installed entries are reported as `cached`; first-time downloads are reported as `downloaded`.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Preload result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SafuSkillPreloadResponse"
+        "502":
+          description: SafuSkill upstream fetch or cache write failed
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /api/v1/skills/by-name:
+    get:
+      tags: [Skills]
+      summary: Search SafuSkill by name and cache it locally
+      description: |
+        Searches `safuskill.ai` for the requested skill name, fetches the matching skill detail, and writes
+        `SKILL.md` plus metadata under the sandbox skill cache directory.
+
+        If the skill is not found upstream but a local cached copy already exists, the handler returns a
+        `local_cache_stale` response that points at the existing local file.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: name
+          required: true
+          schema:
+            type: string
+          description: Skill name to search for.
+      responses:
+        "200":
+          description: Skill resolved and cached
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SafuSkillResolveResponse"
+              examples:
+                freshInstall:
+                  summary: Upstream search succeeded and the skill was cached locally
+                  value:
+                    status: ok
+                    source: safuskill
+                    name: Example Skill
+                    id: skill_123
+                    installed: true
+                    local_path: sandbox_skill/example-skill/SKILL.md
+                    metadata_path: sandbox_skill/example-skill/metadata.json
+                    reload_needed: true
+                staleLocalCopy:
+                  summary: Upstream search failed but a local cached copy exists
+                  value:
+                    status: ok
+                    source: local_cache_stale
+                    name: Example Skill
+                    installed: true
+                    local_path: sandbox_skill/example-skill/SKILL.md
+                    reload_needed: true
+                    update_error: skill "Example Skill" not found on SafuSkill
+        "400":
+          description: Missing `name` query parameter
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "404":
+          description: Skill not found on SafuSkill and no local cached copy exists
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "502":
+          description: SafuSkill upstream fetch or cache write failed
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /api/v1/skills/read:
+    get:
+      tags: [Skills]
+      summary: Read a cached local SafuSkill
+      description: Returns the `SKILL.md` content for a skill that was previously installed into the local sandbox cache.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: name
+          required: true
+          schema:
+            type: string
+          description: Local skill name to read.
+      responses:
+        "200":
+          description: Cached skill contents
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SafuSkillReadResponse"
+              example:
+                status: ok
+                name: Example Skill
+                local_path: sandbox_skill/example-skill/SKILL.md
+                content: |
+                  # Example Skill
+                  ...
+        "400":
+          description: Missing `name` query parameter
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "404":
+          description: Skill is not installed locally
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "500":
+          description: Local skill file read failed
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+  /api/v1/tx/sign:
+    post:
+      tags: [Transactions]
+      summary: Sign a transaction or message
+      description: |
+        Policy-gated sign entry point.
+
+        Behavior summary:
+        - checks wallet activation and PIN TTL
+        - applies chain allowlist, spend limits, risk controls, and blind-sign rules
+        - may fetch share2 from the relay if it is not already available locally
+        - for structured EVM builders, `tx_payload_hex` can be omitted and derived from the builder fields
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SignRequest" }
+            examples:
+              evmNativeTransfer:
+                summary: EVM native transfer
+                value:
+                  chain: ethereum
+                  sign_mode: transaction
+                  uid: uid_123
+                  builder_kind: native_transfer
+                  to: "0x2222222222222222222222222222222222222222"
+                  amount_wei: "1000000000000000"
+                  data: "0x"
+                  confirmed_by_user: true
+              personalSign:
+                summary: Personal sign
+                value:
+                  chain: solana
+                  sign_mode: personal_sign
+                  uid: uid_123
+                  tx_payload_hex: "0x48656c6c6f"
+                  data: "0x"
+                  amount_wei: "0"
+                  confirmed_by_user: true
+      responses:
+        "200":
+          description: Signature result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SignResult" }
+        "400":
+          description: Invalid payload or unsupported structured builder
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "401":
+          description: Wallet locked or not activated
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "403":
+          description: Policy or risk control rejection
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "502":
+          description: Share2 recovery or relay failure
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /api/v1/tx/broadcast:
+    post:
+      tags: [Transactions]
+      summary: Broadcast signed raw transaction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BroadcastRequest" }
+      responses:
+        "200":
+          description: Broadcast result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BroadcastResponse" }
+        "400":
+          description: Validation or broadcast failure
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /api/v1/tx/transfer:
+    post:
+      tags: [Transactions]
+      summary: Build, sign, and submit native or token transfer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TransferRequest" }
+      responses:
+        "200":
+          description: Transfer result
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          description: Invalid transfer request
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /api/v1/tx/evm/invoke:
+    post:
+      tags: [EVM]
+      summary: Legacy gas-price EVM contract call (sign + broadcast)
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ManagedEVMInvokeRequest" }
+      responses:
+        "200":
+          description: Managed EVM tx response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /api/v1/tx/evm/invoke_eip1559:
+    post:
+      tags: [EVM]
+      summary: EIP-1559 EVM contract call (sign + broadcast)
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ManagedEVMInvokeRequest" }
+      responses:
+        "200":
+          description: Managed EVM tx response
+
+  /api/v1/tx/sui/execute_txbytes:
+    post:
+      tags: [Sui]
+      summary: Sign and execute Sui transaction bytes
+      description: |
+        Accepts JSON or raw string payloads depending on the caller.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HaedalTxBytesExecuteRequest" }
+          text/plain:
+            schema: { type: string }
+      responses:
+        "200":
+          description: Sui execution result
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          description: Invalid payload
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /api/v1/tx/sui/execute_option:
+    post:
+      tags: [Sui]
+      summary: Proxy Haedal/Cetus skill option (defi + body)
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HaedalOptionedRequest" }
+      responses:
+        "200":
+          description: Skill-dependent JSON
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /api/v1/tx/swap/evm_uniswap:
+    post:
+      tags: [Swap]
+      summary: Uniswap swap via Trade API (EVM, multi-chain)
+      description: |
+        Multi-chain Uniswap swap entry for **EVM chains** via Uniswap Trade API (requires API key).
+
+        Supported EVM chains (by `chain`):
+        - ethereum (1)
+        - optimism (10)
+        - bsc (56)
+        - polygon (137)
+        - monad (143)
+        - base (8453)
+        - arbitrum (42161)
+        - avalanche (43114)
+        - zksync (324)
+        - linea (59144)
+
+        Notes:
+        - This endpoint uses Uniswap's hosted Trade API for routing (it does not build swap calldata locally).
+        - `token_in` / `token_out` accept EVM token addresses, or `native` for the chain native asset.
+        - If `recipient` is omitted, it defaults to the active wallet address.
+        - `amount_in_wei` is required and must be a decimal string in smallest units.
+        - Slippage / routing controls are optional (e.g. `routing_preference`, `protocols`, `urgency`, `auto_slippage`, `slippage_tolerance`, `permit_amount`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UniswapSwapTradeAPIRequest" }
+      responses:
+        "200":
+          description: Swap pipeline result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UniswapSwapTradeAPIResponse" }
+        "400":
+          description: Invalid swap request or policy rejection
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "503":
+          description: Asset refresh / oracle temporarily unavailable
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "405":
+          description: Method not allowed
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /api/v1/tx/swap/solana-jup:
+    post:
+      tags: [Swap]
+      summary: Jupiter swap on Solana
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/JupiterSwapRequest" }
+      responses:
+        "200":
+          description: Jupiter swap result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JupiterSwapResponse" }
+        "400":
+          description: Invalid swap request or policy rejection
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "503":
+          description: Asset refresh / oracle temporarily unavailable
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "405":
+          description: Method not allowed
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /api/v1/tx/swap/sui-cetus:
+    post:
+      tags: [Swap]
+      summary: Cetus swap on Sui (WIP)
+      description: Handler body not yet implemented; may return **200 with empty body** after POST.
+      responses:
+        "200":
+          description: Placeholder response; often empty until implemented
+        "405":
+          description: Method not POST
+
+  /api/v1/tx/bridge/lifi/quote:
+    post:
+      tags: [Swap]
+      summary: LI.FI Cross-chain Quote Estimation
+      description: Estimate cross-chain/swap between any chain and any token, returning estimated time, available routes, and estimated costs.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LifiBridgeRequest" }
+      responses:
+        "200":
+          description: Estimation result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LifiQuoteResponse" }
+        "400":
+          description: Invalid request parameters
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "500":
+          description: Internal or external API call error
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /api/v1/tx/bridge/lifi/tokens:
+    get:
+      tags: [Swap]
+      summary: LI.FI Supported Tokens
+      description: |
+        Query supported tokens for specific chains.
+        **AGENT INSTRUCTION:** ALWAYS call this endpoint to verify token support before a bridge quote or execution. If cross-chain operations fail (especially for stablecoins like USDT), use this to find the exact supported contract address.
+      parameters:
+        - in: query
+          name: chains
+          required: true
+          schema:
+            type: string
+          description: Comma-separated LI.FI chain IDs (e.g., "1,56,137")
+      responses:
+        "200":
+          description: List of supported tokens
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /api/v1/tx/bridge/lifi/execute:
+    post:
+      tags: [Swap]
+      summary: LI.FI Cross-chain Execution
+      description: Execute cross-chain transaction, sign and broadcast. Includes possible intermediate routes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LifiBridgeRequest" }
+      responses:
+        "200":
+          description: Execution result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LifiBridgeResponse" }
+        "400":
+          description: Invalid request parameters
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "500":
+          description: Transaction execution failed
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /api/v1/tx/bridge/lifi/status:
+    post:
+      tags: [Swap]
+      summary: LI.FI Cross-chain Status Query
+      description: Poll for the latest status of an asynchronous cross-chain task by UID.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LifiStatusRequest" }
+      responses:
+        "200":
+          description: Status result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LifiStatusResponse" }
+        "400":
+          description: Missing or invalid parameters
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /api/v1/sandbox/shutdown:
+    post:
+      tags: [Sandbox]
+      summary: Graceful HTTP server shutdown
+      responses:
+        "200":
+          description: Shutdown acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusMessage"
+              example:
+                status: shutting_down
+
+  /initialize:
+    post:
+      tags: [Control]
+      security: []
+      summary: Legacy installer - set master_pub_key and addresses
+      description: |
+        Used by installer flows. Not wrapped by `auth()` in code and still safe on localhost.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                master_pub_key: { type: string }
+                addresses: { type: object, additionalProperties: { type: string } }
+                uid: { type: string }
+      responses:
+        "200":
+          description: Initialized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusMessage"
+              example:
+                status: initialized
+        "403":
+          description: Identity already set
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /challenge/sign:
+    post:
+      tags: [Control]
+      security: []
+      summary: Sign challenge with active signer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                challenge: { type: string }
+                share1: { $ref: "#/components/schemas/EncryptedShare" }
+                share2: { $ref: "#/components/schemas/EncryptedShare" }
+      responses:
+        "200":
+          description: Signature
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  signature:
+                    type: string
+        "401":
+          description: Not activated
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+  /wipe:
+    post:
+      tags: [Control]
+      summary: Clear in-memory session (policy wipe)
+      responses:
+        "200":
+          description: Memory wiped
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusMessage"
+              example:
+                status: memory_wiped
+
+  /reset:
+    post:
+      tags: [Control]
+      summary: Hard reset local sandbox identity state
+      responses:
+        "200":
+          description: Reset acknowledgement
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusMessage"
+              example:
+                status: hard_reset_complete
+
+  /api/rpc/{chain}:
+    post:
+      tags: [RPC]
+      summary: JSON-RPC proxy to the configured chain endpoint
+      description: |
+        Forwards the request body to the upstream RPC endpoint for the requested chain.
+        The sandbox returns the upstream response status and body.
+      parameters:
+        - name: chain
+          in: path
+          required: true
+          schema:
+            type: string
+            example: solana
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Standard JSON-RPC 2.0 request
+              example:
+                jsonrpc: "2.0"
+                id: 1
+                method: getHealth
+      responses:
+        "200":
+          description: Upstream JSON-RPC response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          description: Unsupported chain or invalid request body
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+        "502":
+          description: Upstream RPC error
+          content:
+            text/plain:
+              schema: { $ref: "#/components/schemas/ErrorText" }
+
+security:
+  - bearerAuth: []
+

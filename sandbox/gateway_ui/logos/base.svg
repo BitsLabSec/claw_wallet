@@ -1,0 +1,7 @@
+<svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <!-- 背景灰色圆 -->
+  <circle cx="100" cy="100" r="100" fill="#F6F6F6"></circle>
+  
+  <!-- 中心蓝色方块（略微圆角更现代） -->
+  <rect x="62" y="62" width="76" height="76" rx="14" fill="#0052FF"></rect>
+</svg>

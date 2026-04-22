@@ -1,0 +1,11 @@
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="tronGrad" x1="12" y1="10" x2="52" y2="54" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FF4D4F" />
+      <stop offset="1" stop-color="#C81D25" />
+    </linearGradient>
+  </defs>
+  <path d="M10 14L23 52L54 20L31 10L10 14Z" stroke="url(#tronGrad)" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M23 52L31 10L54 20" stroke="url(#tronGrad)" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M10 14L31 28L54 20" stroke="url(#tronGrad)" stroke-width="4" stroke-linejoin="round"/>
+</svg>
